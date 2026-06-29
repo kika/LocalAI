@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "vllm/Qwen/Qwen3.5-397B-A17B-FP8",
+  "provider": {
+    "vllm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "vLLM Local",
+      "options": {
+        "baseURL": "http://10.0.0.1:8000/v1",
+        "apiKey": "dummy"
+      },
+      "models": {
+        "Qwen/Qwen3.5-397B-A17B-FP8": {
+          "name": "Qwen3.5 397B"
+        }
+      }
+    }
+  }
+}

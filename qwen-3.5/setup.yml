@@ -1,0 +1,171 @@
+# Ansible playbook for setting up a new HotAisle server
+---
+- hosts: all
+  become: yes
+  vars:
+    user: hotaisle
+    home: "/home/{{ user }}"
+    venv: "{{ home }}/.venv"
+    # WireGuard
+    wg_server_address: 10.0.0.1/24
+    wg_listen_port: 51820
+    wg_client_pubkey: "{{ lookup('file', '/usr/local/etc/wireguard/client_public.key') }}"
+    wg_client_ip: 10.0.0.2/32
+
+  tasks:
+    # --- WireGuard ---
+    - name: Install WireGuard
+      apt:
+        name: wireguard
+        state: present
+        update_cache: yes
+
+    - name: Generate server private key
+      shell: wg genkey
+      register: wg_privkey
+      args:
+        creates: /etc/wireguard/private.key
+
+    - name: Save server private key
+      copy:
+        content: "{{ wg_privkey.stdout }}"
+        dest: /etc/wireguard/private.key
+        mode: "0600"
+      when: wg_privkey.changed
+
+    - name: Derive server public key
+      shell: cat /etc/wireguard/private.key | wg pubkey
+      register: wg_pubkey
+      changed_when: false
+
+    - name: Read server private key
+      slurp:
+        src: /etc/wireguard/private.key
+      register: wg_privkey_file
+
+    - name: Write WireGuard config
+      copy:
+        content: |
+          [Interface]
+          PrivateKey = {{ wg_privkey_file.content | b64decode | trim }}
+          Address = {{ wg_server_address }}
+          ListenPort = {{ wg_listen_port }}
+
+          [Peer]
+          PublicKey = {{ wg_client_pubkey }}
+          AllowedIPs = {{ wg_client_ip }}
+        dest: /etc/wireguard/wg0.conf
+        mode: "0600"
+      notify: Restart WireGuard
+
+    - name: Allow WireGuard port in UFW
+      ufw:
+        rule: allow
+        port: "{{ wg_listen_port }}"
+        proto: udp
+      ignore_errors: yes
+
+    - name: Enable and start WireGuard
+      systemd:
+        name: wg-quick@wg0
+        state: started
+        enabled: yes
+
+    # --- ROCm and vLLM ---
+    - name: Detect ROCm version
+      shell: cat /opt/rocm/.info/version | cut -d. -f1,2
+      register: rocm_ver
+      changed_when: false
+
+    - name: Set torch index
+      set_fact:
+        torch_index: "https://download.pytorch.org/whl/nightly/rocm{{ rocm_ver.stdout }}"
+    - name: Install astral-uv via snap
+      community.general.snap:
+        name: astral-uv
+        classic: yes
+
+    - name: Create venv
+      command: uv venv
+      args:
+        chdir: "{{ home }}"
+        creates: "{{ venv }}/bin/python3"
+      become_user: "{{ user }}"
+
+    - name: Install amdsmi
+      command: uv pip install amdsmi
+      args:
+        chdir: "{{ home }}"
+      become_user: "{{ user }}"
+
+    - name: Install ROCm torch + torchvision
+      command: >
+        uv pip install --pre torch torchvision
+        --index-url {{ torch_index }}
+      args:
+        chdir: "{{ home }}"
+      become_user: "{{ user }}"
+
+    - name: Copy vllm wheel
+      copy:
+        src: ./vllm-dist/vllm-0.16.0rc2.dev367+g98b0205c3.d20260221-cp310-cp310-linux_x86_64.whl
+        dest: "/tmp/"
+
+    - name: Find vllm wheel
+      find:
+        paths: /tmp
+        patterns: "vllm-*.whl"
+      register: wheel
+
+    - name: Install vllm from wheel
+      command: uv pip install {{ wheel.files[0].path }}
+      args:
+        chdir: "{{ home }}"
+      become_user: "{{ user }}"
+
+    - name: Install/upgrade fastapi stack
+      command: >
+        uv pip install --upgrade
+        fastapi starlette anyio exceptiongroup
+      args:
+        chdir: "{{ home }}"
+      become_user: "{{ user }}"
+
+    - name: Install openai client
+      command: uv pip install "openai>=1.0"
+      args:
+        chdir: "{{ home }}"
+      become_user: "{{ user }}"
+
+    - name: Verify torch ROCm
+      command: '{{ venv }}/bin/python3 -c "import torch; print(torch.version.hip)"'
+      become_user: "{{ user }}"
+      register: torch_check
+      changed_when: false
+
+    - name: Allow vLLM port in UFW
+      ufw:
+        rule: allow
+        port: "8000"
+        src: 10.0.0.2/32
+        proto: tcp
+      ignore_errors: yes
+
+    - name: Show torch version
+      debug:
+        msg: |
+          Torch HIP version: {{ torch_check.stdout }}
+          ROCm: {{ rocm_ver.stdout }}
+          WireGuard pubkey: {{ wg_pubkey.stdout }}
+          WireGuard endpoint: {{ ansible_host }}:{{ wg_listen_port }}
+    - name: Copy the run script
+      copy:
+        src: run.sh
+        dest: "{{ home }}/run.sh"
+        mode: "0755"
+
+  handlers:
+    - name: Restart WireGuard
+      systemd:
+        name: wg-quick@wg0
+        state: restarted

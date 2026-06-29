@@ -1,0 +1,25 @@
+[package]
+name = "tcp-stack"
+version = "0.1.0"
+edition = "2021"
+description = "A userspace TCP implementation using raw sockets"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1.0"
+byteorder = "1.5"
+rand = "0.8"
+libc = "0.2"
+
+[dev-dependencies]
+pcap = "2.0"
+
+[[example]]
+name = "echo_server"
+path = "examples/echo_server.rs"
+
+[[example]]
+name = "http_client"
+path = "examples/http_client.rs"
